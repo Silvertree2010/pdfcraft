@@ -1216,7 +1216,19 @@ pub(crate) fn form_call(
     path: &[pdfcraft_cos::ObjRef],
     visits: &mut usize,
 ) -> Option<FormCall> {
-    if path.len() >= MAX_FORM_DEPTH || *visits >= MAX_FORM_VISITS {
+    form_call_with_depth(doc, resources, name, ctm, path, visits, MAX_FORM_DEPTH)
+}
+
+fn form_call_with_depth(
+    doc: &Document,
+    resources: &Dict,
+    name: &[u8],
+    ctm: Matrix,
+    path: &[pdfcraft_cos::ObjRef],
+    visits: &mut usize,
+    max_depth: usize,
+) -> Option<FormCall> {
+    if path.len() >= max_depth || *visits >= MAX_FORM_VISITS {
         return None;
     }
     let xobjects = resources.get(b"XObject").map(|x| doc.resolve(x)).and_then(|x| x.as_dict().cloned())?;
@@ -1254,7 +1266,7 @@ pub type FormLine = (TextLine, Vec<usize>);
 /// then that of the line's last text-showing operator in its form. Positions compare
 /// lexicographically in paint order, and a page-level operator's `[stream, index]` compares with
 /// them the same way. Fails, rather than leave text out, when a form would be entered `max_depth`
-/// forms deep or past the page's [`MAX_FORM_VISITS`] budget.
+/// forms deep or past the page's [`MAX_FORM_VISITS`] budget. The requested depth is capped at 32.
 pub fn form_text_lines(doc: &Document, page: usize, max_depth: usize) -> Result<Vec<FormLine>, EditError> {
     struct Walk<'a> {
         doc: &'a Document,
@@ -1309,7 +1321,7 @@ pub fn form_text_lines(doc: &Document, page: usize, max_depth: usize) -> Result<
             }
             return Ok(());
         }
-        let Some(form) = form_call(w.doc, resources, name, ts.ctm, &w.path, &mut w.visits) else { return Ok(()) };
+        let Some(form) = form_call_with_depth(w.doc, resources, name, ts.ctm, &w.path, &mut w.visits, w.max_depth) else { return Ok(()) };
         let ops = parse(&form.data).ops;
         // The form starts with the graphics state at its `Do`, its own matrix applied.
         let mut carry = Carry { ts: Ts { ctm: form.ctm, ..ts }, stack: Vec::new(), marked: Vec::new() };
@@ -1327,7 +1339,7 @@ pub fn form_text_lines(doc: &Document, page: usize, max_depth: usize) -> Result<
     let pieces = Pieces::join(&content_streams(doc, &p.dict).into_iter().map(|(_, d)| d).collect::<Vec<_>>());
     let ops = pieces.parse().ops;
     let at = |i: usize| vec![ops.get(i).map_or(0, |op| pieces.pieces_of(op).0), i];
-    let mut w = Walk { doc, max_depth, lines: Vec::new(), path: Vec::new(), visits: 0 };
+    let mut w = Walk { doc, max_depth: max_depth.min(32), lines: Vec::new(), path: Vec::new(), visits: 0 };
     walk(&mut w, &ops, &res, &mut Carry::new(), &at, false)?;
     Ok(w.lines)
 }
