@@ -599,3 +599,32 @@ fn box_before_form_text_is_not_a_cover() {
         assert!(findings.is_empty(), "{page} / {form}: {findings:?}");
     }
 }
+
+#[test]
+fn covered_text_at_form_depth_limit_is_audited_or_fails_closed() {
+    for depth in [12, 13, 32, 33] {
+        let mut b = Builder::new();
+        b.add("<< /Type /Catalog /Pages 2 0 R >>");
+        b.add("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+        b.add("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /XObject << /Fm 5 0 R >> >> >>");
+        b.add_stream(b"/Fm Do 0 g 70 600 120 30 re f");
+        for i in 0..depth - 1 {
+            let resources = format!("/Type /XObject /Subtype /Form /BBox [0 0 612 792] /Resources << /XObject << /Fm {} 0 R >> >>", 6 + i);
+            b.add_stream_with(b"/Fm Do", &resources);
+        }
+        let resources = format!("/Type /XObject /Subtype /Form /BBox [0 0 612 792] /Resources << /Font << /F1 {} 0 R >> >>", 5 + depth);
+        b.add_stream_with(b"BT /F1 14 Tf 72 610 Td (SECRET 123) Tj ET", &resources);
+        b.add(FONT);
+        let result = audit_redactions(&open(b.build()));
+        if depth <= 32 {
+            assert!(
+                result.as_ref().is_ok_and(|findings| findings
+                    .iter()
+                    .any(|finding| finding.kind == FindingKind::CoveredText && finding.covered_text == "SECRET 123")),
+                "depth {depth}: expected covered-text finding: {result:?}"
+            );
+        } else {
+            assert!(result.is_err(), "depth {depth}: audit must fail closed: {result:?}");
+        }
+    }
+}
