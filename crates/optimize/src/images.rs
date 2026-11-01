@@ -463,7 +463,7 @@ fn is_dct(s: &Stream) -> Option<bool> {
 
 #[cfg(test)]
 thread_local! {
-    /// Pixels decoded from JPEG data, for the test that keeps a mismatched JPEG from decoding.
+    /// Pixels decoded, for the tests that keep an image from being decoded for nothing.
     static DECODED_PIXELS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
@@ -801,7 +801,7 @@ type Pixel = fn(&[u8]) -> Option<bool>;
 /// with its width and height, and, when they were packed from more bits, its dictionary as a 1-bit
 /// image. These count:
 /// - one bit per pixel in one colour component, or an image mask, stored with no filter, with
-///   general-purpose ones, or with CCITT fax last ([`Document::decoded_image_within`], no further
+///   general-purpose ones, or with CCITT fax or JBIG2 last ([`Document::decoded_image_within`], no further
 ///   than its rows can need);
 /// - with `pack`, and with no colour-key `/Mask` (its ranges are in the image's own values):
 ///   - eight-bit grey (one component, not indexed) whose every sample is 0 or 255. A decode array
@@ -832,11 +832,10 @@ fn one_bit(doc: &Document, s: &Stream, pack: bool, defaults: bool) -> Option<(Ve
         let len = stride.checked_mul(hu)?;
         let max = match s.filters().last() {
             Some((pdfcraft_filters::Filter::CcittFax, _)) => wu.checked_mul(hu)?.checked_add(hu.checked_mul(4)?)?.checked_add(4096)?,
-            // `decoded_image_within` reads JBIG2 too, but not for this yet: a resampled JBIG2 image
-            // would come out Flate under Retain, and nothing weighs JBIG2 again against it.
-            Some((pdfcraft_filters::Filter::Jbig2, _)) => return None,
+            // A JBIG2 page, which has to be the image's size, is `len` bytes as rows of a bit.
             _ => allowance(len, h)?,
         };
+        count_decoded(u64::from(w) * u64::from(h));
         let mut data = doc.decoded_image_within(s, max).ok()?;
         if data.len() < len {
             return None;
@@ -1094,12 +1093,13 @@ fn downsample_bits_checked(data: &[u8], w: u32, h: u32, nw: u32, nh: u32, dark_i
 ///   (a 50% screen black, a 25% one white). So would a square of four new pixels that each cover
 ///   both, as a small screened picture on a white page has (and ragged scanned text, which is then
 ///   left at its resolution too).
-/// - **Stored** as CCITT Group 4 with `CcittG4`, or as 1-bit Flate when that is smaller, which only
-///   a resampled image or one packed from more bits may be: a 1-bit image that is only stored again
-///   becomes Group 4 or stays. Group 4 alone is only decoded to be resampled; Group 3 is stored
-///   again like any other. With `Retain`, a resampled image keeps its kind of compression
-///   (CCITT, or Flate), and nothing else changes: an image of more bits stays as it is, for the
-///   grey or colour settings.
+/// - **Stored** as CCITT Group 4 with `CcittG4`, or JBIG2 with `Jbig2`, or as 1-bit Flate when that
+///   is smaller, which only a resampled image or one packed from more bits may be: a 1-bit image
+///   that is only stored again becomes Group 4 or JBIG2, or stays. Group 4 alone is only decoded
+///   to be resampled, and so is JBIG2 alone when Group 4 is asked for; Group 3, Group 4 inside
+///   another filter, and JBIG2 otherwise are stored again like any other. With `Retain`, a resampled image keeps its kind of compression (CCITT, JBIG2, or
+///   Flate), and nothing else changes: an image of more bits stays as it is, for the grey or
+///   colour settings. A JBIG2 image stored again refers to no `/JBIG2Globals`.
 ///
 /// The samples keep their meaning, so the colour space, decode array and `/Mask` stay, but for
 /// black-and-white RGB, which becomes grey with one decode pair, and an indexed image's default
@@ -1111,10 +1111,14 @@ fn mono(doc: &Document, s: &Stream, ppi: f64, defaults: bool, settings: &MonoSet
     let fax = doc.fax_params(s);
     // Its kind of compression, which Retain keeps, behind any other filters.
     let ccitt = fax.is_some();
-    // Group 4 alone is only worth decoding to resample it. Group 3, or Group 4 behind
-    // ASCII85Decode, say, can be smaller stored again as Group 4 alone.
-    let g4_alone = fax.is_some_and(|p| p.k < 0) && s.filters().len() == 1;
-    if (retain || (g4_alone && settings.compression == MonoCompression::CcittG4)) && !downsample {
+    let jbig2 = matches!(s.filters().last(), Some((pdfcraft_filters::Filter::Jbig2, _)));
+    // Group 4 alone is only worth decoding to resample it, and so is JBIG2 alone when Group 4 is what
+    // it would be stored as: that output is rarely smaller, and decoding an ordinary scan costs a
+    // quarter of a second a page. Group 3, Group 4 behind ASCII85Decode, say, and JBIG2 stored as
+    // JBIG2 (whose symbols may be smaller than its own coding) can be smaller stored again alone.
+    let alone_to_g4 = s.filters().len() == 1 && settings.compression == MonoCompression::CcittG4;
+    let only_to_resample = retain || (alone_to_g4 && (jbig2 || fax.is_some_and(|p| p.k < 0)));
+    if only_to_resample && !downsample {
         return None;
     }
     let (data, w, h, packed) = one_bit(doc, s, !retain, defaults)?;
@@ -1146,7 +1150,7 @@ fn mono(doc: &Document, s: &Stream, ppi: f64, defaults: bool, settings: &MonoSet
         Some(out) => (out, nw, nh),
         None => (data, w, h),
     };
-    if (retain || (g4_alone && settings.compression == MonoCompression::CcittG4)) && !resampled {
+    if only_to_resample && !resampled {
         return None;
     }
     let mut dict = packed.unwrap_or_else(|| d.clone());
@@ -1169,7 +1173,7 @@ fn mono(doc: &Document, s: &Stream, ppi: f64, defaults: bool, settings: &MonoSet
     } else {
         None
     };
-    let jbig = if settings.compression == MonoCompression::Jbig2 {
+    let jbig = if settings.compression == MonoCompression::Jbig2 || (retain && jbig2) {
         pdfcraft_filters::encode_jbig2(&data, nw, nh).ok().map(|coded| {
             let mut dict = dict.clone();
             dict.set(b"Filter".to_vec(), Object::name("JBIG2Decode"));
@@ -1178,7 +1182,7 @@ fn mono(doc: &Document, s: &Stream, ppi: f64, defaults: bool, settings: &MonoSet
     } else {
         None
     };
-    let flate = ((resampled || packed_from_more) && !(retain && ccitt)).then(|| Stream::flate(dict, &data));
+    let flate = ((resampled || packed_from_more) && !(retain && (ccitt || jbig2))).then(|| Stream::flate(dict, &data));
     // Smaller as stored, counting the dictionary: a tiny image can lose by Group 4's parameters.
     let best = [g4, jbig, flate].into_iter().flatten().filter_map(|c| Some((crate::stored_len(&c)?, c))).min_by_key(|(len, _)| *len)?;
     (best.0 < crate::stored_len(s)?).then_some((best.1, resampled))
@@ -1319,6 +1323,36 @@ mod dimension_tests {
         dict.set(b"Height".to_vec(), Object::Int(2));
         let stream = Stream::from_raw(dict, vec![1, 2, 3, 4, 5]);
         assert_eq!(pixels(&Document::new_empty(), &stream, 1), Some(vec![1, 2, 3, 4]));
+    }
+
+    /// JBIG2 alone, with Group 4 asked for, is decoded only to be resampled. A cost guard: dropped,
+    /// no output changes, and an ordinary scan pays a quarter of a second a page for nothing. Behind
+    /// another filter it can still be stored again, as Group 4 can.
+    #[test]
+    fn a_jbig2_image_alone_is_not_decoded_for_group_4_unless_it_is_resampled() {
+        let coded = pdfcraft_filters::encode_jbig2_generic(&[0xFF; 4], 16, 2).unwrap();
+        let hex: Vec<u8> = coded.iter().flat_map(|b| format!("{b:02x}").into_bytes()).chain(*b">").collect();
+        let image = |filter: Object, data: Vec<u8>| {
+            let mut dict = Dict::new();
+            dict.set(b"Width".to_vec(), Object::Int(16));
+            dict.set(b"Height".to_vec(), Object::Int(2));
+            dict.set(b"BitsPerComponent".to_vec(), Object::Int(1));
+            dict.set(b"ColorSpace".to_vec(), Object::name("DeviceGray"));
+            dict.set(b"Filter".to_vec(), filter);
+            Stream::from_raw(dict, data)
+        };
+        let settings = MonoSettings { compression: MonoCompression::CcittG4, ..MonoSettings::REDUCE };
+        let decoded = |s: &Stream, settings: &MonoSettings| {
+            DECODED_PIXELS.with(|c| c.set(0));
+            mono(&Document::new_empty(), s, 300.0, false, settings);
+            DECODED_PIXELS.with(|c| c.get())
+        };
+        let alone = image(Object::name("JBIG2Decode"), coded.clone());
+        assert_eq!(decoded(&alone, &settings), 0, "alone, for Group 4, below the threshold");
+        let behind = image(Object::Array(vec![Object::name("ASCIIHexDecode"), Object::name("JBIG2Decode")]), hex);
+        assert!(decoded(&behind, &settings) > 0, "behind another filter it can be stored again");
+        let jbig2 = MonoSettings { compression: MonoCompression::Jbig2, ..MonoSettings::REDUCE };
+        assert!(decoded(&alone, &jbig2) > 0, "stored as JBIG2 its symbols may come out smaller");
     }
 
     /// A JPEG larger than its dictionary says is refused from its header, before its pixels are decoded.
