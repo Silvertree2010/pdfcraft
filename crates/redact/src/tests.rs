@@ -938,6 +938,133 @@ fn a_redacted_jbig2_scan_keeps_neither_its_code_nor_its_globals() {
     }
 }
 
+/// The segments of a JBIG2 stream `encode_jbig2` wrote, each with its header: a header is the
+/// segment's number (4 bytes), type, flags whose top three bits count the segments it refers to,
+/// those (a byte each), its page (a byte) and its data's length (4 bytes; ISO/IEC 14492 7.2).
+fn jbig2_segments(mut coded: &[u8]) -> Vec<Vec<u8>> {
+    let mut segments = Vec::new();
+    while !coded.is_empty() {
+        let refers = usize::from(coded[5] >> 5);
+        let header = 4 + 1 + 1 + refers + 1 + 4;
+        let length = u32::from_be_bytes(coded[header - 4..header].try_into().unwrap()) as usize;
+        segments.push(coded[..header + length].to_vec());
+        coded = &coded[header + length..];
+    }
+    segments
+}
+
+/// Two pages of a scan share one `/JBIG2Globals` stream holding the symbol dictionary, as
+/// `jbig2enc -s` and most scanners write them, and the first has a mark found nowhere else (a
+/// signature, say) under the area. The dictionary holds that mark's bitmap, so once the first page
+/// is redacted the second page's image is stored again without the globals, and neither the
+/// dictionary nor any stream naming globals stays in the saved file; both pages keep every pixel
+/// outside the area.
+#[test]
+fn globals_a_redacted_jbig2_image_shares_with_another_page_leave_the_file() {
+    const LETTER: [&str; 7] = ["#####", "#....", "####.", "#....", "#....", "#....", "#####"];
+    const SIGNATURE: [&str; 7] = ["#..#.##", ".##.#..", "#.#..##", "..##.#.", "##..#.#", ".#.##..", "#..#..#"];
+    let (w, h) = (400usize, 40usize);
+    let stride = w.div_ceil(8);
+    let draw = |bits: &mut [u8], shape: &[&str], top: usize, left: usize| {
+        for (dy, row) in shape.iter().enumerate() {
+            for (dx, _) in row.bytes().enumerate().filter(|(_, c)| *c == b'#') {
+                bits[(top + dy) * stride + (left + dx) / 8] &= !(0x80 >> ((left + dx) % 8));
+            }
+        }
+    };
+    // The letter over and over lower down, and the signature once, top left, under the mark.
+    let mut first = vec![0xFFu8; stride * h];
+    for top in [14usize, 24, 32] {
+        for x in (3..w - 6).step_by(7) {
+            draw(&mut first, &LETTER, top, x);
+        }
+    }
+    draw(&mut first, &SIGNATURE, 2, 10);
+    let mut second = vec![0xFFu8; stride * h];
+    for x in (3..w - 6).step_by(7) {
+        draw(&mut second, &LETTER, 20, x);
+    }
+    // The first page's symbol dictionary (its second segment) goes to the globals, on no page; the
+    // second page's segments are numbered past it.
+    let mut segments = jbig2_segments(&pdfcraft_filters::encode_jbig2(&first, w as u32, h as u32).unwrap());
+    assert_eq!(segments[1][4], 0, "the second segment is the symbol dictionary");
+    let mut dictionary = segments.remove(1);
+    dictionary[6] = 0;
+    let page_one: Vec<u8> = segments.concat();
+    let page_two: Vec<u8> = jbig2_segments(&pdfcraft_filters::encode_jbig2_generic(&second, w as u32, h as u32).unwrap())
+        .into_iter()
+        .enumerate()
+        .flat_map(|(k, mut s)| {
+            s[..4].copy_from_slice(&(100 + k as u32).to_be_bytes());
+            s
+        })
+        .collect();
+    let image = format!(
+        "/Type /XObject /Subtype /Image /Width {w} /Height {h} /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /JBIG2Decode /DecodeParms << /JBIG2Globals 9 0 R >>"
+    );
+    // Half a point a pixel, the image's top row at y 120.
+    let page = |content: u32, im: u32| {
+        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Contents {content} 0 R /Resources << /XObject << /Im {im} 0 R >> >> >>")
+            .into_bytes()
+    };
+    let build = |second_image: &str| {
+        pdf(vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_vec(),
+            page(5, 7),
+            page(6, 8),
+            stream("", b"q 200 0 0 20 0 100 cm /Im Do Q".as_slice()),
+            stream("", b"q 200 0 0 20 0 100 cm /Im Do Q".as_slice()),
+            stream(&image, page_one.clone()),
+            stream(second_image, page_two.clone()),
+            stream("", dictionary.clone()),
+        ])
+    };
+    let mut doc = build(&image);
+    // A page's picture as it is drawn, JBIG2 read with its globals.
+    let picture = |doc: &Document, page: usize, name: &[u8]| {
+        let p = pdfcraft_model::pages(doc).swap_remove(page);
+        let res = doc.resolve(p.dict.get(b"Resources")?).as_dict().cloned()?;
+        let xo = doc.resolve(res.get(b"XObject")?).as_dict().cloned()?;
+        match &*doc.get(xo.get(name)?.as_ref()?) {
+            Object::Stream(s) => doc.decoded_image(s).ok(),
+            _ => None,
+        }
+    };
+    assert_eq!(picture(&doc, 0, b"Im"), Some(first.clone()), "the first page reads its symbols from the globals");
+    assert_eq!(picture(&doc, 1, b"Im"), Some(second.clone()));
+    // Columns 0 to 99 of rows 0 to 12.
+    mark(&mut doc, 0, &[[0.25, 113.75, 49.75, 120.0]], "");
+    let report = apply(&mut doc, None).unwrap();
+    assert_eq!((report.images_cleared, report.images_removed, report.images_restored), (1, 0, 1));
+    let mut cleared = first.clone();
+    for y in 0..=12 {
+        for x in 0..=99 {
+            cleared[y * stride + x / 8] &= !(0x80 >> (x % 8));
+        }
+    }
+    let saved = reopen(&doc);
+    assert_eq!(picture(&saved, 0, b"PCRedacted1"), Some(cleared));
+    assert_eq!(picture(&saved, 1, b"Im"), Some(second), "the second page keeps its picture");
+    // The dictionary's data (after its 11-byte header) codes the signature's bitmap.
+    let coded = &dictionary[11..];
+    for (r, object) in saved.scan_objects() {
+        let mut bytes = Vec::new();
+        pdfcraft_cos::serialize(&object, &mut bytes);
+        assert!(!bytes.windows(b"JBIG2Globals".len()).any(|w| w == b"JBIG2Globals"), "{r:?} still names globals");
+        let data = match &*object {
+            Object::Stream(s) => s.decoded().unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        assert!(!bytes.windows(coded.len()).chain(data.windows(coded.len())).any(|w| w == coded), "the symbol dictionary stays as {r:?}");
+    }
+    // The second page's image can't be read for certain (its JBIG2 page is shorter than the
+    // image), so it can't be stored without the globals: the redaction is refused.
+    let mut doc = build(&image.replace(&format!("/Height {h}"), &format!("/Height {}", h + 1)));
+    mark(&mut doc, 0, &[[0.25, 113.75, 49.75, 120.0]], "");
+    assert!(matches!(apply(&mut doc, None), Err(RedactError::SharedJbig2Globals(1))));
+}
+
 /// Apply Redactions gives the page its own pruned /Resources, but the dictionary it drew through
 /// before (inherited from the /Pages node, or shared with another page) still named the removed
 /// image and form, so a full-rewrite save kept them.
