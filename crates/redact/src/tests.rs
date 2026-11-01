@@ -1154,10 +1154,8 @@ fn globals_a_redacted_jbig2_image_shares_with_another_page_leave_the_file() {
         }
     }
     draw(&mut first, &SIGNATURE, 2, 10);
-    let mut second = vec![0xFFu8; stride * h];
-    for x in (3..w - 6).step_by(7) {
-        draw(&mut second, &LETTER, 20, x);
-    }
+    // The second page is a scan's ragged text, which Group 4 or JBIG2 stores smaller than Flate.
+    let second = ragged_scan(w, h);
     // The first page's symbol dictionary (its second segment) goes to the globals, on no page; the
     // second page's segments are numbered past it.
     let mut segments = jbig2_segments(&pdfcraft_filters::encode_jbig2(&first, w as u32, h as u32).unwrap());
@@ -1219,7 +1217,12 @@ fn globals_a_redacted_jbig2_image_shares_with_another_page_leave_the_file() {
     }
     let saved = reopen(&doc);
     assert_eq!(picture(&saved, 0, b"PCRedacted1"), Some(cleared));
-    assert_eq!(picture(&saved, 1, b"Im"), Some(second), "the second page keeps its picture");
+    assert_eq!(picture(&saved, 1, b"Im"), Some(second.clone()), "the second page keeps its picture");
+    // Stored again as a scan is: Group 4 or JBIG2 when smaller than Flate.
+    let restored = named_stream(&saved, 1, b"Im").unwrap();
+    let flate = pdfcraft_filters::encode_flate(&second);
+    assert_ne!(restored.dict.name(b"Filter"), Some(&b"FlateDecode"[..]));
+    assert!(restored.raw.len() < flate.len(), "{:?} {} bytes, Flate {}", restored.dict.name(b"Filter"), restored.raw.len(), flate.len());
     // The dictionary's data (after its 11-byte header) codes the signature's bitmap.
     let coded = &dictionary[11..];
     for (r, object) in saved.scan_objects() {

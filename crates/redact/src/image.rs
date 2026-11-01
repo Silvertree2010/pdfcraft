@@ -204,7 +204,8 @@ fn stored_len(s: &Stream) -> usize {
 }
 
 /// JBIG2 image `s` stored again without its `/JBIG2Globals`: decoded through them, as it is drawn,
-/// and written as a Flate image of the same samples, its other entries kept. `None` when it can't
+/// and written as the same samples, Flate, Group 4 or JBIG2 coded alone, whichever is smallest
+/// (`smallest`), its other entries kept. `None` when it can't
 /// be decoded for certain (too large, data that doesn't decode, a JBIG2 page of another size than
 /// the image, or not a one-bit image of one component). Redaction does this to every image that
 /// shares a redacted image's globals, since their symbol dictionary holds the shapes of marks drawn
@@ -231,5 +232,8 @@ pub(crate) fn without_globals(doc: &Document, s: &Stream) -> Option<Stream> {
     data.truncate(bytes);
     let mut dict = s.dict.clone();
     dict.remove(b"Length");
-    Some(Stream::flate(dict, &data))
+    // The globals are named in the parameters; the copy is coded alone, as `clear`'s are.
+    dict.remove(b"DecodeParms");
+    dict.remove(b"Alternates");
+    Some(smallest(dict, &data, w, h, true, true))
 }

@@ -25,8 +25,8 @@ clear_marks(&mut doc, None)?;                        // remove marks without app
   when it was JBIG2, whichever is smallest as stored, coded from the cleared samples; it refers to
   no globals. Globals hold the shapes of every image that shares them (a scan's pages, often),
   those of marks under the area included, so every other image that uses the globals of a removed
-  or replaced image is decoded and stored again in place as Flate without them
-  (`Report::images_restored`), and they leave the file on the full rewrite; one that can't be
+  or replaced image is decoded and stored again in place without them, as a copy is (Flate,
+  Group 4 or JBIG2, whichever is smallest; `Report::images_restored`), and they leave the file on the full rewrite; one that can't be
   decoded for certain refuses the redaction (`RedactError::SharedJbig2Globals`). Codecs redaction doesn't decode (DCT, JPX) are
   removed whole (fail-closed), and so is a JBIG2 image whose page isn't its size (the renderer
   draws the whole page into the image, so the rows cleared wouldn't be the ones shown) or of more
