@@ -740,6 +740,8 @@ fn a_busy_fax_image_behind_another_filter_is_cleared() {
 /// on a scan coded with symbols and on one coded as a generic region. `COVERED` and `KEPT` are pixels
 /// found nowhere else in the image, one lot under the mark and one beside it, so the search is seen
 /// to find what stays. The one letter over and over, lower down, is what makes symbols worth coding.
+/// The picture saved is the one with every pixel under the mark cleared and no other changed, so a
+/// search that one cleared byte would blind isn't all that holds this.
 #[test]
 fn no_stream_holds_the_pixels_under_a_mark_on_a_jbig2_scan() {
     const COVERED: [u8; 8] = [0x0F, 0x3C, 0x5A, 0xC3, 0x96, 0x69, 0xA5, 0x1E];
@@ -765,6 +767,12 @@ fn no_stream_holds_the_pixels_under_a_mark_on_a_jbig2_scan() {
             _ => false,
         })
     };
+    // Columns 0 to 99 of rows 0 to 7.
+    let mut cleared = bits.clone();
+    for row in cleared.chunks_mut(stride).take(8) {
+        row[..12].fill(0);
+        row[12] &= 0x0F;
+    }
     let symbols = pdfcraft_filters::encode_jbig2(&bits, w as u32, h as u32).unwrap();
     let generic = pdfcraft_filters::encode_jbig2_generic(&bits, w as u32, h as u32).unwrap();
     assert!(symbols.len() < generic.len(), "symbol coding has to be what this tests");
@@ -773,12 +781,12 @@ fn no_stream_holds_the_pixels_under_a_mark_on_a_jbig2_scan() {
         // Half a point a pixel, its top row at y 132.
         let mut doc = one_page(b"q 256 0 0 32 0 100 cm /Im Do Q", "/XObject << /Im 7 0 R >>", vec![stream(&dict, coded)]);
         assert!(holds(&doc, &COVERED) && holds(&doc, &KEPT), "the pixels are there to be found");
-        // Columns 0 to 99 of rows 0 to 7.
         mark(&mut doc, 0, &[[0.25, 128.25, 49.75, 132.0]], "");
         assert_eq!(apply(&mut doc, None).unwrap().images_cleared, 1);
         let saved = Document::open(Arc::new(write_full(&doc, &SaveOptions::default()).unwrap())).unwrap();
         assert!(!holds(&saved, &COVERED), "the covered pixels stayed in the file");
         assert!(holds(&saved, &KEPT), "the pixels beside them stay");
+        assert!(holds(&saved, &cleared), "every pixel under the mark is cleared, and no other changed");
     }
 }
 
