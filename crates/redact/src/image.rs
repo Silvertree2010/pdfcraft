@@ -202,3 +202,34 @@ fn stored_len(s: &Stream) -> usize {
     pdfcraft_cos::serialize(&Object::Dict(s.dict.clone()), &mut dict);
     dict.len().saturating_add(s.raw.len())
 }
+
+/// JBIG2 image `s` stored again without its `/JBIG2Globals`: decoded through them, as it is drawn,
+/// and written as a Flate image of the same samples, its other entries kept. `None` when it can't
+/// be decoded for certain (too large, data that doesn't decode, a JBIG2 page of another size than
+/// the image, or not a one-bit image of one component). Redaction does this to every image that
+/// shares a redacted image's globals, since their symbol dictionary holds the shapes of marks drawn
+/// under the area too.
+pub(crate) fn without_globals(doc: &Document, s: &Stream) -> Option<Stream> {
+    let (w, h) = (s.dict.int(b"Width")?, s.dict.int(b"Height")?);
+    if w <= 0 || h <= 0 || (w as u64) * (h as u64) > MAX_PIXELS {
+        return None;
+    }
+    let (w, h) = (w as usize, h as usize);
+    let mask = matches!(s.dict.get(b"ImageMask"), Some(Object::Bool(true)));
+    // JBIG2 codes one-bit images of one component (ISO 32000-2 §7.4.7).
+    if !mask && (components(doc, s)?, s.dict.int(b"BitsPerComponent")?) != (1, 1) {
+        return None;
+    }
+    let bytes = w.div_ceil(8).checked_mul(h)?;
+    // As for `clear`: the filters before the JBIG2 decoder may give up to three bytes for each one
+    // of the raster and a byte a row.
+    let allowance = bytes.checked_add(h)?.checked_mul(3)?.checked_add(4096)?;
+    let mut data = doc.decoded_image_within(s, allowance).ok()?;
+    if data.len() < bytes {
+        return None;
+    }
+    data.truncate(bytes);
+    let mut dict = s.dict.clone();
+    dict.remove(b"Length");
+    Some(Stream::flate(dict, &data))
+}
