@@ -736,6 +736,52 @@ fn a_busy_fax_image_behind_another_filter_is_cleared() {
     assert_eq!((report.images_cleared, report.images_removed), (1, 0));
 }
 
+/// After a save no stream holds the pixels under a mark, read as it would be shown, JBIG2 included,
+/// on a scan coded with symbols and on one coded as a generic region. `COVERED` and `KEPT` are pixels
+/// found nowhere else in the image, one lot under the mark and one beside it, so the search is seen
+/// to find what stays. The one letter over and over, lower down, is what makes symbols worth coding.
+#[test]
+fn no_stream_holds_the_pixels_under_a_mark_on_a_jbig2_scan() {
+    const COVERED: [u8; 8] = [0x0F, 0x3C, 0x5A, 0xC3, 0x96, 0x69, 0xA5, 0x1E];
+    const KEPT: [u8; 8] = [0x87, 0x2D, 0x4B, 0xE1, 0x78, 0xD2, 0xB4, 0x1F];
+    const LETTER: [&str; 7] = ["#####", "#....", "####.", "#....", "#....", "#....", "#####"];
+    let (w, h) = (512usize, 64usize);
+    let stride = w / 8;
+    let mut bits = vec![0xFFu8; stride * h];
+    bits[stride * 2..stride * 2 + 8].copy_from_slice(&COVERED);
+    bits[stride * 2 + 16..stride * 2 + 24].copy_from_slice(&KEPT);
+    for top in (16..h - 8).step_by(10) {
+        for x in (4..w - 8).step_by(8) {
+            for (dy, row) in LETTER.iter().enumerate() {
+                for (dx, _) in row.bytes().enumerate().filter(|(_, c)| *c == b'#') {
+                    bits[(top + dy) * stride + (x + dx) / 8] &= !(0x80 >> ((x + dx) % 8));
+                }
+            }
+        }
+    }
+    let holds = |doc: &Document, pixels: &[u8]| {
+        doc.scan_objects().any(|(_, object)| match &*object {
+            Object::Stream(s) => doc.decoded_image(s).is_ok_and(|d| d.windows(pixels.len()).any(|w| w == pixels)),
+            _ => false,
+        })
+    };
+    let symbols = pdfcraft_filters::encode_jbig2(&bits, w as u32, h as u32).unwrap();
+    let generic = pdfcraft_filters::encode_jbig2_generic(&bits, w as u32, h as u32).unwrap();
+    assert!(symbols.len() < generic.len(), "symbol coding has to be what this tests");
+    for coded in [symbols, generic] {
+        let dict = format!("/Type /XObject /Subtype /Image /Width {w} /Height {h} /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /JBIG2Decode");
+        // Half a point a pixel, its top row at y 132.
+        let mut doc = one_page(b"q 256 0 0 32 0 100 cm /Im Do Q", "/XObject << /Im 7 0 R >>", vec![stream(&dict, coded)]);
+        assert!(holds(&doc, &COVERED) && holds(&doc, &KEPT), "the pixels are there to be found");
+        // Columns 0 to 99 of rows 0 to 7.
+        mark(&mut doc, 0, &[[0.25, 128.25, 49.75, 132.0]], "");
+        assert_eq!(apply(&mut doc, None).unwrap().images_cleared, 1);
+        let saved = Document::open(Arc::new(write_full(&doc, &SaveOptions::default()).unwrap())).unwrap();
+        assert!(!holds(&saved, &COVERED), "the covered pixels stayed in the file");
+        assert!(holds(&saved, &KEPT), "the pixels beside them stay");
+    }
+}
+
 /// `/JBIG2Globals` data a decoder skips: one extension segment (ISO/IEC 14492 7.4.14) of a type it
 /// needn't read, holding `secret`; its 11-byte header gives the length of the data after it.
 fn jbig2_globals(secret: &[u8]) -> Vec<u8> {
