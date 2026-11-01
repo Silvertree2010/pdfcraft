@@ -978,6 +978,7 @@ fn a_cleared_image_group_4_wouldnt_shrink_stays_flate() {
     let wide = pdfcraft_filters::MAX_G4_COLUMNS as usize + 1;
     for (w, h) in [(3usize, 2usize), (wide, 2)] {
         let stride = w.div_ceil(8);
+        assert_eq!(pdfcraft_filters::encode_g4(&vec![0xFF; stride * h], w as u32, h as u32).is_ok(), w != wide, "{w} × {h}");
         let dict = format!("/Type /XObject /Subtype /Image /Width {w} /Height {h} /BitsPerComponent 1 /ColorSpace /DeviceGray /Filter /FlateDecode");
         let mut doc = one_page(
             b"q 200 0 0 20 0 100 cm /Im Do Q",
