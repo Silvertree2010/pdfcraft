@@ -3119,7 +3119,7 @@ fn freehand_highlighter_draws_translucent_yellow_ink() {
 #[test]
 fn hotbar_picker_adds_and_runs_freehand_highlight() {
     let mut h = harness(|_| {});
-    h.get_by_label("+").click();
+    h.get_by_label("Hotbar settings").click();
     h.run_steps(3);
     field(&h, "Search all tools…").click();
     h.run_steps(2);
@@ -3140,6 +3140,23 @@ fn hotbar_picker_adds_and_runs_freehand_highlight() {
     h.query_all_by_role_and_label(Role::Button, "Freehand-Highlight").last().unwrap().click();
     h.run_steps(3);
     assert_eq!(h.state().quick_tool, QuickTool::Comment(pdfcraft_ui_egui::comments::CommentTool::FreehandHighlight));
+}
+
+#[test]
+fn hotbar_picker_searches_translated_tool_labels() {
+    let mut h = harness(|app| {
+        app.set_option("language", "fr").unwrap();
+    });
+    h.get_by_label("Hotbar settings").click();
+    h.run_steps(3);
+    field(&h, "Search all tools…").click();
+    h.run_steps(2);
+    field(&h, "Search all tools…").type_text("Dessiner");
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::CheckBox, "Dessiner à main levée").click();
+    h.run_steps(3);
+    let saved: serde_json::Value = serde_json::from_str(&h.state().persist()).unwrap();
+    assert_eq!(saved["hotbar"]["tools"], serde_json::json!(["comment.ink"]));
 }
 
 #[test]
@@ -3189,15 +3206,15 @@ fn hotbar_settings_reopen_even_with_remembered_collapsed_state() {
         egui::collapsing_header::CollapsingState::load_with_default_open(&h.ctx, egui::Id::unique("hotbar-picker").with("collapsing"), false);
     collapsed.set_open(false);
     collapsed.store(&h.ctx);
-    h.get_by_label("+").click();
+    h.get_by_label("Hotbar settings").click();
     h.run_steps(5);
     assert!(h.query_by_label("Close menu").is_some());
-    h.get_by_label("+").click();
+    h.get_by_label("Hotbar settings").click();
     h.run_steps(3);
-    assert!(h.query_by_label("Close menu").is_some(), "+ always shows settings");
+    assert!(h.query_by_label("Close menu").is_some(), "Hotbar settings always shows settings");
     h.get_by_label("Close menu").click();
     h.run_steps(3);
-    h.get_by_label("+").click();
+    h.get_by_label("Hotbar settings").click();
     h.run_steps(3);
     assert!(h.query_by_label("Close menu").is_some());
 }
@@ -3208,7 +3225,7 @@ fn hotbar_full_side_strip_spans_each_edge_and_returns_to_float() {
         app.set_option("hotbar-side", "right").unwrap();
         app.set_option("hotbar-size", "48").unwrap();
     });
-    h.get_by_label("+").click();
+    h.get_by_label("Hotbar settings").click();
     h.run_steps(5);
     h.get_by_label("Full-side strip").click();
     h.run_steps(3);
@@ -3222,7 +3239,7 @@ fn hotbar_full_side_strip_spans_each_edge_and_returns_to_float() {
         let (length, thickness) = if matches!(side, "left" | "right") { (size.y, size.x) } else { (size.x, size.y) };
         assert!(length > 300.0, "strip must fill the edge: {side} {size:?}");
         assert!(thickness <= 64.0, "strip must stay narrow: {size:?}");
-        h.get_by_label("+");
+        h.get_by_label("Hotbar settings");
     }
     let saved: serde_json::Value = serde_json::from_str(&h.state().persist()).unwrap();
     assert_eq!(saved["hotbar"]["full_side"], true);

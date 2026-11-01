@@ -362,10 +362,10 @@ fn navigation_rail_toggles_between_right_and_left_and_persists() {
     assert_eq!(h2.state().side_panels.rail_side, pdfcraft_ui_egui::side_panels::ToolsSide::Left);
     h2.state_mut().dialog = Some(Dialog::Preferences);
     h2.run_steps(3);
-    h2.get_by_label("Navigation rail on right").click();
+    h2.get_by_label("Navigation rail side: Right").click();
     h2.run_steps(3);
     assert_eq!(h2.state().side_panels.rail_side, pdfcraft_ui_egui::side_panels::ToolsSide::Right);
-    h2.get_by_label("Navigation rail on left").click();
+    h2.get_by_label("Navigation rail side: Left").click();
     h2.run_steps(3);
     assert_eq!(h2.state().side_panels.rail_side, pdfcraft_ui_egui::side_panels::ToolsSide::Left);
 }

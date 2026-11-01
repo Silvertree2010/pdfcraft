@@ -33,6 +33,16 @@ pub(crate) fn grow(r: [f64; 4], by: f64) -> [f64; 4] {
     [r[0] - by, r[1] - by, r[2] + by, r[3] + by]
 }
 
+/// Tight bounding box of ink strokes, including Bezier control points for strokes with three or
+/// more points (matching [`appearance::smooth_segments`]).
+pub(crate) fn ink_bounds(strokes: &[Vec<[f64; 2]>]) -> Option<[f64; 4]> {
+    let controls = strokes.iter().filter(|s| s.len() > 2).flat_map(|s| {
+        let pts: Vec<(f64, f64)> = s.iter().map(|p| (p[0], p[1])).collect();
+        appearance::smooth_segments(&pts).into_iter().flat_map(|[a, b, _]| [[a.0, a.1], [b.0, b.1]])
+    });
+    bounds(strokes.iter().flatten().copied().chain(controls))
+}
+
 pub(crate) fn ending_draws(ending: LineEnding) -> bool {
     ending != LineEnding::None
 }
@@ -91,13 +101,7 @@ pub(crate) fn rect_for(shape: &Shape, style: &Style) -> Result<[f64; 4], AnnotEr
             if strokes.iter().all(Vec::is_empty) || !strokes.iter().flatten().all(|p| finite(p)) {
                 return Err(bad("drawing (no points)"));
             }
-            // Strokes of three or more points are drawn as curves, which stay within their
-            // points and control points.
-            let controls = strokes.iter().filter(|s| s.len() > 2).flat_map(|s| {
-                let pts: Vec<(f64, f64)> = s.iter().map(|p| (p[0], p[1])).collect();
-                appearance::smooth_segments(&pts).into_iter().flat_map(|[a, b, _]| [[a.0, a.1], [b.0, b.1]])
-            });
-            grow(bounds(strokes.iter().flatten().copied().chain(controls)).unwrap_or_default(), half + 1.0)
+            grow(ink_bounds(strokes).unwrap_or_default(), half + 1.0)
         }
         Shape::Polygon { vertices, cloud } => {
             let b = bounds(vertices.iter().copied())

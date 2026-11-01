@@ -88,15 +88,19 @@ impl Hotbar {
 fn settings_button(ui: &mut egui::Ui, cell: f32, picker_open: &mut bool) {
     let settings = ui
         .push_id("hotbar-settings", |ui| {
-            let mut btn = icons::button(ui, "settings", cell, false, tl!("Hotbar settings"));
-            btn = btn.on_hover_text(tl!("Hotbar settings / add tools"));
-            btn.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "+"));
-            btn
+            icons::button(ui, "settings", cell, false, tl!("Hotbar settings")).on_hover_text(tl!("Hotbar settings / add tools"))
         })
         .inner;
     if settings.clicked() {
         *picker_open = true;
     }
+}
+
+/// Whether `spec` matches the hotbar picker search query across the translated label, canonical
+/// English label, or command identifier (case-insensitively).
+fn matches_search(spec: &pdfcraft_engine::commands::CommandSpec, query: &str) -> bool {
+    let search = query.to_lowercase();
+    tl!(spec.label).to_lowercase().contains(&search) || spec.label.to_lowercase().contains(&search) || spec.id.to_lowercase().contains(&search)
 }
 
 /// Render the configured tool shortcut buttons and their removal context menus.
@@ -270,18 +274,19 @@ pub(crate) fn show(app: &mut PdfCraftApp, area: Rect, ctx: &egui::Context) {
                     }
                 }
             });
+            let strip_hint = tl!("Extend the docked toolbar along the entire side. Choose a side above to enable.");
             ui.add_enabled(bar.dock.is_some(), crate::widgets::checkbox(&mut bar.full_side, tl!("Full-side strip")))
-                .on_hover_text(tl!("Extend the docked toolbar along the entire side. Choose a side above to enable."));
+                .on_hover_text(strip_hint)
+                .on_disabled_hover_text(strip_hint);
             if ui.button(tl!("Close menu")).clicked() {
                 ui.close();
             }
             ui.separator();
             ui.label(tl!("Add tools to hotbar"));
             ui.add(egui::TextEdit::singleline(&mut bar.search).hint_text(tl!("Search all tools…")));
-            let search = bar.search.to_lowercase();
             egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
                 for spec in COMMANDS {
-                    if !spec.label.to_lowercase().contains(&search) && !spec.id.contains(&search) {
+                    if !matches_search(spec, &bar.search) {
                         continue;
                     }
                     let mut selected = bar.tools.iter().any(|id| id == spec.id);
@@ -351,5 +356,17 @@ mod tests {
         app.restore(r#"{"hotbar":{"tools":["invalid","comment.ink","comment.ink"],"position":[-10,999]}}"#);
         assert_eq!(app.hotbar.tools, ["comment.ink"]);
         assert_eq!(app.hotbar.position, [0.0, 1.0]);
+    }
+
+    #[test]
+    fn hotbar_search_matches_translated_and_canonical_labels() {
+        let ink = command("comment.ink").unwrap();
+        crate::i18n::set_current(crate::i18n::lang_from_tag("fr").unwrap());
+        assert_eq!(tl!(ink.label), "Dessiner à main levée");
+        assert!(matches_search(ink, "dessiner"), "translated French label must match");
+        assert!(matches_search(ink, "freehand"), "canonical English label must still match");
+        assert!(matches_search(ink, "comment.ink"), "command ID must still match");
+        assert!(!matches_search(ink, "introuvable"));
+        crate::i18n::set_current(crate::i18n::Lang::EN);
     }
 }
